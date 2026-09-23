@@ -35,4 +35,4 @@ mkdir -p results/raw
 instances=("$INSTANCE_DIR"/*.txt)
 instance="${instances[$SLURM_ARRAY_TASK_ID]}"
 
-./drcrffsp --instance "$instance" --method cp_lex_pool
+./drcrffsp --instance "$instance" --method cp_lex_pool --time-limit 3600
