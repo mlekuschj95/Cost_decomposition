@@ -2082,3 +2082,36 @@ void CP_Model::set_time_limit(double seconds)
     }
     cp_.setParameter(IloCP::TimeLimit, seconds);
 }
+
+vector<int> CP_Model::get_worker_assignment(const DRCRFFSP_Instance& instance) const
+{
+    vector<int> assignment(o_, -1);
+
+    for (int i = 0; i < o_; ++i) {
+
+        const Operation& op = instance.operation(i);
+        int stageId = op.stageId();
+        int number_workers = (instance.stage_begin() + stageId - 1)->number_workers();
+
+        for (int w = 0; w < number_workers && assignment[i] == -1; ++w) {
+
+            int workerId = *((instance.stage_begin() + stageId - 1)->worker_begin() + w);
+
+            for (int mode = 0; mode < workers_[workerId - 1].getSize(); ++mode) {
+
+                if (cp_.isPresent(workers_[workerId - 1][mode])) {
+
+                    string name = workers_[workerId - 1][mode].getName();
+                    string expected = to_string(i) + "_" + to_string(workerId);
+
+                    if (name == expected) {
+                        assignment[i] = workerId;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return assignment;
+}

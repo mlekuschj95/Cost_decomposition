@@ -31,7 +31,7 @@
 INSTANCE_DIR="Instances/Tiny"
 METHODS=(cp_wws cp_cmax cp_lex lb_ap decomp_wws)
 
-mkdir -p results/raw
+mkdir -p results/raw results/assignments
 
 instances=("$INSTANCE_DIR"/*.txt)
 n_methods=${#METHODS[@]}

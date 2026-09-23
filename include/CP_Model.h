@@ -295,6 +295,21 @@ public:
     // (see Decomposition::run()'s time_limit_seconds parameter). Also used
     // by the experiment CLI to apply --time-limit uniformly.
     void set_time_limit(double seconds);
+
+    // Reads back which worker was actually assigned to each operation on
+    // the most recently solved model (Optimal or Feasible status) --
+    // result[i] = the 1-based worker ID (matching Worker::Id()) chosen for
+    // operation i, or -1 if operation i has no present mode (should not
+    // happen for a feasible solution). Reads the SAME optional-interval
+    // "mode" presence pattern the constructor builds (see CP_Model.cpp) --
+    // a pure query, does not change the model. Ported out of the existing
+    // (but fragile: hardcoded output path, an unexplained
+    // filename().erase(0, 25)) create_schedule_from_CP() so both the
+    // integrated model (worker chosen freely by CP, e.g. cp_lex) and the
+    // fixed-assignment model (worker chosen by MASTER_Model beforehand)
+    // can have their resulting assignment read back the same way for
+    // comparison (see the 2026-09-23 conversation).
+    vector<int> get_worker_assignment(const DRCRFFSP_Instance& instance) const;
 };
 
 #endif

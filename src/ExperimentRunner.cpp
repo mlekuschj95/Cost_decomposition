@@ -87,6 +87,30 @@ void write_csv_row(const Row& row, const string& path) {
     out << "\n";
 }
 
+// Writes the achieved (operation index, worker id) assignment as plain
+// text, one "i,worker_id" pair per line -- a companion file alongside this
+// run's CSV row, for the assignment-decision research comparison (see the
+// 2026-09-23 conversation): does CP's freely-chosen assignment (cp_lex)
+// differ from the CPLEX-optimal one it could have been seeded with
+// (cp_lex_seeded), and how? Caller must ensure the parent directory
+// (results/assignments/) already exists -- this does not create it,
+// matching write_csv_row's own reliance on the caller (the SLURM script)
+// having already `mkdir -p`'d results/raw/.
+void write_assignment_file(const vector<int>& assignment, const string& path) {
+    ofstream out(path);
+    if (!out) {
+        cerr << "ERROR: could not open assignment output file for writing: " << path << endl;
+        return;
+    }
+    for (size_t i = 0; i < assignment.size(); ++i) {
+        out << i << "," << assignment[i] << "\n";
+    }
+}
+
+string assignment_result_path(const string& run_id) {
+    return "results/assignments/" + run_id + ".txt";
+}
+
 // ------------------------------------------------------------------
 // Small path / string helpers (no external dependency; instance paths on
 // the cluster are plain POSIX paths, but this also tolerates a Windows
@@ -249,7 +273,7 @@ bool parse_args(int argc, char** argv, Options& opt, string& error) {
     static const vector<string> valid_methods = {
         "cp_wws", "cp_cmax", "cp_lex", "lb_ap", "decomp_wws",
         "cp_wws_eps", "lb_ap_eps", "decomp_eps", "cp_lex_pool",
-        "cp_wws_eps_seeded"
+        "cp_wws_eps_seeded", "cp_lex_seeded"
     };
     if (find(valid_methods.begin(), valid_methods.end(), opt.method) == valid_methods.end()) {
         error = "unknown --method: " + opt.method;
@@ -510,6 +534,13 @@ int run_experiment_cli(int argc, char** argv) {
                 set_field_d("best_Cmax", cmax);
                 set_field_d("best_WWS", wws);
                 set_field_d("actual_Cmax", cmax);
+
+                // Export CP's own freely-chosen assignment (worker chosen
+                // by CP's search itself, not fixed beforehand) for
+                // comparison against cp_lex_seeded's CPLEX-fixed one --
+                // see write_assignment_file's doc comment.
+                vector<int> assignment = model.get_worker_assignment(instance);
+                write_assignment_file(assignment, assignment_result_path(run_id));
             }
 
         }
@@ -650,6 +681,84 @@ int run_experiment_cli(int argc, char** argv) {
                                 gap_percent(best_wws, lb_ap));
                 } else {
                     set_field("solver_status", "UNKNOWN");
+                }
+            }
+
+        }
+        else if (opt.method == "cp_lex_seeded") {
+
+            // Single CPLEX-optimal assignment (solve_master(), NOT the
+            // pool -- one assignment, not several split across time), then
+            // solve_static_lex() on THAT fixed assignment for this run's
+            // FULL --time-limit budget -- unlike cp_lex_pool, no
+            // time-splitting across multiple candidates. Directly
+            // comparable to plain cp_lex on the SAME time budget: the only
+            // difference is "assignment fixed to the CPLEX load-optimum"
+            // vs "assignment chosen freely by CP's own search" -- see the
+            // 2026-09-23 conversation for why this isolates the
+            // assignment-choice question that cp_lex_pool's time-diluted
+            // comparison couldn't.
+
+            auto t_start = chrono::steady_clock::now();
+            auto elapsed_seconds = [&]() -> double {
+                return chrono::duration<double>(
+                    chrono::steady_clock::now() - t_start).count();
+            };
+
+            MASTER_Model master(instance, -1.0, opt.time_limit);
+            MasterSolution sol = master.solve_master();
+
+            set_field_i("seed", 1);   // MASTER_Model always pins RandomSeed=1
+
+            if (!sol.feasible) {
+
+                set_field("solver_status", "INFEASIBLE");
+                set_field_b("feasible", false);
+                set_field_b("optimality_proven", false);
+                set_field_d("runtime_sec", elapsed_seconds());
+
+            }
+            else {
+
+                double lb_ap = sol.objective_value;
+                set_field_d("LB_AP", lb_ap);
+
+                double remaining = opt.time_limit - elapsed_seconds();
+                if (remaining < 1.0) {
+                    remaining = 1.0;
+                }
+
+                CP_Model subproblem(instance, sol.worker_assignment);
+                CPSolveInfo info;
+                auto lex_result = subproblem.solve_static_lex(remaining, &info);
+                float cmax = get<0>(lex_result);
+                float wws = get<1>(lex_result);
+
+                bool feasible = (info.status == IloAlgorithm::Optimal || info.status == IloAlgorithm::Feasible);
+
+                // Same LEX_OPTIMAL distinction as plain cp_lex (see that
+                // branch's comment): an Optimal status here proves the
+                // complete lexicographic optimum FOR THIS FIXED
+                // ASSIGNMENT, not across all possible assignments.
+                if (info.status == IloAlgorithm::Optimal) {
+                    set_field("solver_status", "LEX_OPTIMAL");
+                } else {
+                    set_field("solver_status", status_string(info.status));
+                }
+                set_field_b("feasible", feasible);
+                set_field_b("optimality_proven", info.status == IloAlgorithm::Optimal);
+                set_field_d("runtime_sec", elapsed_seconds());
+
+                if (feasible) {
+                    set_field_d("best_WWS", wws);
+                    set_field_d("actual_Cmax", cmax);
+                    set_field_d("gap_to_assignment_lb_percent", gap_percent(wws, lb_ap));
+
+                    // The assignment is already KNOWN here (it's the
+                    // input, not something to read back from CP) -- export
+                    // it directly for comparison against plain cp_lex's
+                    // freely-chosen one.
+                    write_assignment_file(sol.worker_assignment, assignment_result_path(run_id));
                 }
             }
 
