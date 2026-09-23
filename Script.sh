@@ -1,40 +1,48 @@
 #!/bin/bash
 #SBATCH -J DRCRFFSP_run
-#SBATCH -N 1
-#SBATCH --ntasks-per-node=8
-#SBATCH --ntasks-per-core=1
-#SBATCH --time=30:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --time=01:10:00
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=johanna.mlekusch@univie.ac.at
-#SBATCH --output=slurm-%j.out
-#SBATCH --error=slurm-%j.err
+#SBATCH --output=slurm-%A_%a.out
+#SBATCH --error=slurm-%A_%a.err
+#SBATCH --array=0-699
 
-# Runs every instance in INSTANCE_DIR through ./drcrffsp, MODE per instance,
-# BATCH_SIZE instances at a time in parallel (matched to --ntasks-per-node
-# above), one output file per instance under RESULTS_DIR.
+# One SLURM ARRAY TASK per (instance, method) pair -- each task runs exactly
+# ONE ./drcrffsp --instance <file> --method <method> call, which is
+# internally capped at --time-limit 3600s (see ExperimentRunner.cpp's
+# Options default), so the 1h10m per-TASK walltime above comfortably covers
+# it regardless of this cluster's QOSMaxWallDurationPerJobLimit -- the
+# earlier version submitted everything as ONE job (batches of 8, requesting
+# multiple days of walltime for that single job) and was rejected by that
+# QOS limit. SLURM's own scheduler decides how many array tasks run
+# concurrently, governed by this account's QOS/partition limits, not a
+# hardcoded batch size.
+#
+# METHODS is common.py's STAGE1_METHODS (the non-epsilon comparison set);
+# none of these require --epsilon. Each run writes exactly one CSV row to
+# its own file under results/raw/ (ExperimentRunner's default --output
+# path), so concurrent array tasks never contend on a shared file. Gather
+# them afterward with experiments/merge_results.py.
+#
+# --array=0-699 assumes 140 instances * 5 methods = 700 tasks (indices
+# 0..699). If INSTANCE_DIR's instance count changes, recompute this and
+# either edit the #SBATCH --array line above or override it at submit time:
+#   sbatch --array=0-<instances*methods-1> Script.sh
 
-RESULTS_DIR="results/Small"
 INSTANCE_DIR="Instances/Small"
-MODE="all"
-BATCH_SIZE=8
+METHODS=(cp_wws cp_cmax cp_lex lb_ap decomp_wws)
 
-mkdir -p "$RESULTS_DIR"
+mkdir -p results/raw
 
 instances=("$INSTANCE_DIR"/*.txt)
-total=${#instances[@]}
-batch_num=1
+n_methods=${#METHODS[@]}
 
-for ((i = 0; i < total; i += BATCH_SIZE)); do
-    echo "################################"
-    echo "# Batch $batch_num"
-    echo "################################"
+instance_idx=$(( SLURM_ARRAY_TASK_ID / n_methods ))
+method_idx=$(( SLURM_ARRAY_TASK_ID % n_methods ))
 
-    for ((j = i; j < i + BATCH_SIZE && j < total; j++)); do
-        instance="${instances[j]}"
-        name=$(basename "$instance" .txt)
-        ./drcrffsp "$instance" "$MODE" >> "$RESULTS_DIR/${name}_out.txt" &
-    done
-    wait
+instance="${instances[$instance_idx]}"
+method="${METHODS[$method_idx]}"
 
-    batch_num=$((batch_num + 1))
-done
+./drcrffsp --instance "$instance" --method "$method"

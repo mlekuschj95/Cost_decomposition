@@ -7,9 +7,9 @@ DEBUG 	= -O0 -g -Wall -Werror -Wno-sign-compare -pedantic -pg
 OPTIM	= -O3
 
 # compiler
-CXX = g++ -std=c++17
+CXX = g++ -std=c++11
 # linker
-LD = g++ -std=c++17
+LD = g++ -std=c++11
 
 ifeq ($(BUILD), debug)
 BUILDFLAGS = $(DEBUG)

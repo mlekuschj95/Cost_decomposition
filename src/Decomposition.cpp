@@ -4,7 +4,6 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
-#include <optional>
 #include <string>
 
 Decomposition::Decomposition(
@@ -390,7 +389,7 @@ DecompositionResult Decomposition::run(
 
     DecompositionResult result;
 
-    auto finalize = [&](bool proven, bool unresolved) {
+    auto finalize = [&](bool proven, bool unresolved) -> DecompositionResult {
         result.optimality_proven = proven;
         result.unresolved = unresolved;
         result.global_lb = global_lb_;
@@ -416,9 +415,11 @@ DecompositionResult Decomposition::run(
     };
 
     // Processes exactly one assignment: zero-idle test, pool bookkeeping,
-    // no-good cut. Returns a finalized result if the run should stop here
-    // (either announce_optimum() was already called, or UNKNOWN was hit),
-    // or std::nullopt if the caller should keep going. See the note on
+    // no-good cut. Returns true and fills `out` with a finalized result if
+    // the run should stop here (either announce_optimum() was already
+    // called, or UNKNOWN was hit), or returns false if the caller should
+    // keep going (no std::optional -- this must build under C++11, per the
+    // cluster's g++/CPLEX toolchain). See the note on
     // PoolEntry::zero_idle_proven_infeasible in Decomposition.h and the
     // "correctness issue" writeup for why a zero-idle FEASIBLE result does
     // NOT unconditionally prove global optimality here.
@@ -430,7 +431,7 @@ DecompositionResult Decomposition::run(
     // schedule at all exists for A under epsilon" -- see PoolEntry::
     // epsilon_infeasible and the class-level comment in Decomposition.h.
     auto process_assignment =
-        [&](const MasterSolution& assignment) -> std::optional<DecompositionResult> {
+        [&](const MasterSolution& assignment, DecompositionResult& out) -> bool {
 
         ++stats_.master_assignments_examined;
 
@@ -446,7 +447,8 @@ DecompositionResult Decomposition::run(
             cout << "\nZero-idle status UNKNOWN for this assignment "
                     "(e.g. time limit reached). Stopping; no no-good cut "
                     "added." << endl;
-            return finalize(false, true);
+            out = finalize(false, true);
+            return true;
         }
 
         PoolEntry entry;
@@ -464,7 +466,8 @@ DecompositionResult Decomposition::run(
 
             if (optimality_proven()) {
                 announce_optimum();
-                return finalize(true, false);
+                out = finalize(true, false);
+                return true;
             }
 
             cout << "\nWWS(A) is known exactly, but the global LB has not "
@@ -506,7 +509,8 @@ DecompositionResult Decomposition::run(
                     cout << "\nDisambiguation status UNKNOWN. Cannot "
                             "safely classify this assignment; stopping."
                          << endl;
-                    return finalize(false, true);
+                    out = finalize(false, true);
+                    return true;
                 }
 
                 is_epsilon_infeasible = (feas == FeasibilityStatus::INFEASIBLE);
@@ -550,7 +554,7 @@ DecompositionResult Decomposition::run(
         pool_.push_back(entry);
         master_->add_no_good_cut(entry.worker_assignment);
 
-        return std::nullopt;
+        return false;
     };
 
     cout << "\n==============================" << endl;
@@ -670,9 +674,9 @@ DecompositionResult Decomposition::run(
             cout << "\nBatch " << batch_round << ", assignment #"
                  << assignment_index << endl;
 
-            auto outcome = process_assignment(assignment);
-            if (outcome.has_value()) {
-                return *outcome;
+            DecompositionResult outcome;
+            if (process_assignment(assignment, outcome)) {
+                return outcome;
             }
         }
 
@@ -750,9 +754,9 @@ DecompositionResult Decomposition::run(
             cout << "\nPopulate() missed at least one assignment at this "
                     "level; processing it and retrying populate()." << endl;
 
-            auto outcome = process_assignment(check);
-            if (outcome.has_value()) {
-                return *outcome;
+            DecompositionResult outcome;
+            if (process_assignment(check, outcome)) {
+                return outcome;
             }
 
             batch = master_->solve_master_pool();
@@ -889,9 +893,9 @@ DecompositionResult Decomposition::run(
                     "assignment and has not yet been processed; "
                     "processing it now." << endl;
 
-            auto outcome = process_assignment(check);
-            if (outcome.has_value()) {
-                return *outcome;
+            DecompositionResult outcome;
+            if (process_assignment(check, outcome)) {
+                return outcome;
             }
 
             bool any_relevant = false;

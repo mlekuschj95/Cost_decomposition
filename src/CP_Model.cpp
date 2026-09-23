@@ -176,7 +176,13 @@ CP_Model::CP_Model(const DRCRFFSP_Instance& instance) {
 
 		// single-threaded solving
 		cp_.setParameter(IloCP::Workers, 1);
-		//cp_.setOut(env_.getNullStream());
+		// Suppresses CP Optimizer's own per-solve search log (branches,
+		// restarts, propagation stats) -- with many solves per instance
+		// (obj2, lex, and every Decomposition subproblem), that log alone
+		// would dwarf the actual result lines in the output file. This
+		// object's own cout<< diagnostics are unaffected (they don't go
+		// through cp_.out()).
+		cp_.setOut(env_.getNullStream());
 		//cp_.setParameter(IloCP::LogVerbosity, IloCP::Terse);
 		//cp_.setParameter(IloCP::LogPeriod, 10000);
 		//Set time limit to 1 hour
@@ -530,8 +536,13 @@ CP_Model::CP_Model(
             1
         );
 
-        // Optional:
-        // cp_.setOut(env_.getNullStream());
+        // Suppresses CP Optimizer's own per-solve search log -- this
+        // constructor is instantiated once per master assignment during
+        // Decomposition::run(), so its search log alone would otherwise
+        // dominate the output file for any instance with more than a
+        // handful of assignments. Does not affect this class's own
+        // cout<< diagnostics (they don't go through cp_.out()).
+        cp_.setOut(env_.getNullStream());
 
 
         cout << "\nCP decomposition subproblem created successfully."
@@ -946,7 +957,7 @@ ThresholdFeasibilityResult CP_Model::solve_wws_below_threshold(
             else {
 
                 idle_bound_constraint =
-                    (IloSizeOf(span) <= info.load + max_idle);
+                    (IloSizeOf(span) <= static_cast<IloInt>(info.load + max_idle));
 
                 cout << "    span <=    " << (info.load + max_idle) << endl;
             }
@@ -1194,7 +1205,7 @@ tuple<float,float> CP_Model::solve_static_lex(double time_limit_seconds, CPSolve
 	return make_tuple(opt_1,opt_2);
 }
 
-float CP_Model::solve_obj(const DRCRFFSP_Instance& instance,int i, double cmax_epsilon, CPSolveInfo* info) {
+float CP_Model::solve_obj(const DRCRFFSP_Instance& instance,int i, double cmax_epsilon, CPSolveInfo* info, double known_wws_lower_bound) {
 	if (cmax_epsilon > 0) {
 		// Permanent Cmax <= cmax_epsilon constraint -- the "CP-WWS-EPS"
 		// experiment method (min WWS s.t. Cmax<=epsilon) when combined
@@ -1227,6 +1238,14 @@ float CP_Model::solve_obj(const DRCRFFSP_Instance& instance,int i, double cmax_e
 		cons_f1 = (expr_1 <= instance.sumpr());
 		model_.add(cons_f1);
 		////////////////////////////////////////////////////////
+		if (known_wws_lower_bound > 0) {
+			// Redundant given a mathematically valid bound (see this
+			// method's doc comment in CP_Model.h) -- seeds CP Optimizer's
+			// own bound/pruning with an externally-proven value instead of
+			// making it re-derive a comparable one through much weaker
+			// propagation.
+			model_.add(IloSum(costs_) >= known_wws_lower_bound);
+		}
 	}
 
 	

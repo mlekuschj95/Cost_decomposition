@@ -88,10 +88,15 @@ else()
     set(_concert_lib_dir "${CPLEX_STUDIO_DIR}/concert/lib/${CPLEX_LINUX_PLATFORM}/static_pic")
     set(_cp_lib_dir "${CPLEX_STUDIO_DIR}/cpoptimizer/lib/${CPLEX_LINUX_PLATFORM}/static_pic")
 
+    # Order matters for GNU ld with static .a archives (single left-to-right
+    # pass): a library needing symbols from a later one must come first.
+    # -lcp (CP Optimizer) needs Concert; -lilocplex (the IloCplex/IloCplexI
+    # C++ wrapper -- distinct from the plain-C libcplex.a) needs both
+    # Concert and the base CPLEX library.
     target_link_libraries(drcrffsp PRIVATE
         "${_cp_lib_dir}/libcp.a"
-        "${_concert_lib_dir}/libconcert.a"
         "${_cplex_lib_dir}/libilocplex.a"
+        "${_concert_lib_dir}/libconcert.a"
         "${_cplex_lib_dir}/libcplex.a"
         pthread
         dl

@@ -248,14 +248,16 @@ bool parse_args(int argc, char** argv, Options& opt, string& error) {
 
     static const vector<string> valid_methods = {
         "cp_wws", "cp_cmax", "cp_lex", "lb_ap", "decomp_wws",
-        "cp_wws_eps", "lb_ap_eps", "decomp_eps"
+        "cp_wws_eps", "lb_ap_eps", "decomp_eps", "cp_lex_pool",
+        "cp_wws_eps_seeded"
     };
     if (find(valid_methods.begin(), valid_methods.end(), opt.method) == valid_methods.end()) {
         error = "unknown --method: " + opt.method;
         return false;
     }
 
-    bool needs_epsilon = (opt.method == "cp_wws_eps" || opt.method == "lb_ap_eps" || opt.method == "decomp_eps");
+    bool needs_epsilon = (opt.method == "cp_wws_eps" || opt.method == "lb_ap_eps" ||
+                           opt.method == "decomp_eps" || opt.method == "cp_wws_eps_seeded");
     if (needs_epsilon && (!opt.has_epsilon || opt.epsilon <= 0)) {
         error = "--method " + opt.method + " requires a positive --epsilon";
         return false;
@@ -395,6 +397,64 @@ int run_experiment_cli(int argc, char** argv) {
             }
 
         }
+        else if (opt.method == "cp_wws_eps_seeded") {
+
+            // See the 2026-09-23 conversation: does seeding cp_wws_eps's
+            // CP search with lb_ap_eps's own proven lower bound (as a
+            // redundant IloSum(costs_) >= LB constraint -- mathematically
+            // implied by the true model already, so this changes neither
+            // the feasible region nor the true optimum) let CP Optimizer
+            // reach/recognize optimality faster than deriving a
+            // comparable bound through its own much weaker propagation?
+            // A DIFFERENT method from cp_wws_eps on purpose (not a
+            // modification of it) so the unseeded baseline stays
+            // available for direct comparison.
+            //
+            // Two-step, ONE process, no SLURM job-dependency needed: the
+            // master solve is cheap (a MIP, no scheduling) and shares this
+            // run's own --time-limit budget with the CP search that
+            // follows it, rather than getting its own separate budget.
+
+            auto t0 = chrono::steady_clock::now();
+
+            MASTER_Model master(instance, opt.epsilon, opt.time_limit);
+            MasterSolution sol = master.solve_master();
+
+            double known_lb = sol.feasible ? sol.objective_value : -1.0;
+            set_field_i("seed", 1);   // MASTER_Model always pins RandomSeed=1
+            if (sol.feasible) {
+                set_field_d("LB_AP", sol.objective_value);
+            }
+
+            double master_elapsed =
+                chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+            double remaining = opt.time_limit - master_elapsed;
+            if (remaining < 1.0) {
+                remaining = 1.0;   // guard against a degenerate slice
+            }
+
+            CP_Model model(instance);
+            model.set_time_limit(remaining);
+            CPSolveInfo info;
+            float wws = model.solve_obj(instance, 2, opt.epsilon, &info, known_lb);
+
+            set_field("solver_status", status_string(info.status));
+            bool feasible = (info.status == IloAlgorithm::Optimal || info.status == IloAlgorithm::Feasible);
+            set_field_b("feasible", feasible);
+            set_field_b("optimality_proven", info.status == IloAlgorithm::Optimal);
+            set_field_d("runtime_sec",
+                        chrono::duration<double>(chrono::steady_clock::now() - t0).count());
+
+            if (feasible) {
+                set_field_d("best_WWS", wws);
+                set_field_d("actual_Cmax", info.secondary_value);
+                if (info.bound >= 0) {
+                    set_field_d("WWS_lower_bound", info.bound);
+                    set_field_d("WWS_gap_percent", gap_percent(wws, info.bound));
+                }
+            }
+
+        }
         else if (opt.method == "cp_cmax") {
 
             CP_Model model(instance);
@@ -475,6 +535,123 @@ int run_experiment_cli(int argc, char** argv) {
             }
             // MASTER_Model's constructor always pins CPLEX RandomSeed=1.
             set_field_i("seed", 1);
+
+        }
+        else if (opt.method == "cp_lex_pool") {
+
+            // Diagnostic method (see the 2026-09-22 conversation): does
+            // seeding solve_static_lex() with an already LB_AP-optimal
+            // assignment (from the master's solution pool) close most of
+            // the WWS gap to LB_AP by itself? If so, that's evidence the
+            // gap seen from cp_wws/cp_lex is mostly idle time, not
+            // assignment suboptimality -- see gap_to_assignment_lb_percent
+            // below. This is NOT the full decomposition: no zero-idle
+            // proof, no no-good-cut enumeration, no optimality claim --
+            // just "best schedule found across a handful of
+            // assignment-cost-optimal assignments, each given a share of
+            // one shared --time-limit budget."
+            //
+            // Whole method (master pool solve + every static_lex attempt)
+            // is capped at opt.time_limit total, split as: however long
+            // the master pool solve takes, then whatever remains divided
+            // adaptively across pool members -- each attempt gets
+            // (time remaining) / (attempts remaining), so a pool member
+            // that finishes quickly leaves MORE time for the next one,
+            // rather than a fixed slice going unused (the same problem
+            // that made decomp_wws stall on Small: one hard call
+            // consuming the entire budget). Capped at a small pool size
+            // (10, not solve_master_pool()'s default 500) -- trying
+            // hundreds of largely-symmetric tied-optimal assignments
+            // would waste both the populate() call and the time budget.
+            const int kPoolSize = 10;
+
+            auto t_start = chrono::steady_clock::now();
+            auto elapsed_seconds = [&]() -> double {
+                return chrono::duration<double>(
+                    chrono::steady_clock::now() - t_start).count();
+            };
+
+            MASTER_Model master(instance, -1.0, opt.time_limit);
+            vector<MasterSolution> pool = master.solve_master_pool(kPoolSize);
+
+            set_field_i("pool_size", static_cast<long long>(pool.size()));
+            set_field_i("seed", 1);   // MASTER_Model always pins RandomSeed=1
+
+            if (pool.empty()) {
+
+                set_field("solver_status", "INFEASIBLE");
+                set_field_b("feasible", false);
+                set_field_b("optimality_proven", false);
+                set_field_d("runtime_sec", elapsed_seconds());
+
+            }
+            else {
+
+                // Every pool entry shares the same objective_value (see
+                // solve_master_pool()'s AbsGap/RelGap = 0 restriction) --
+                // this IS LB_AP, the same quantity the standalone lb_ap
+                // method reports.
+                double lb_ap = pool.front().objective_value;
+                set_field_d("LB_AP", lb_ap);
+
+                bool has_incumbent = false;
+                float best_wws = -1.0f;
+                float best_cmax = -1.0f;
+                int attempts = 0;
+
+                for (size_t i = 0; i < pool.size(); ++i) {
+
+                    double remaining = opt.time_limit - elapsed_seconds();
+                    if (remaining <= 0.5) {
+                        break;   // budget exhausted -- stop, don't attempt more
+                    }
+
+                    double slice = remaining / static_cast<double>(pool.size() - i);
+                    ++attempts;
+
+                    CP_Model subproblem(instance, pool[i].worker_assignment);
+                    CPSolveInfo info;
+                    auto lex_result = subproblem.solve_static_lex(slice, &info);
+                    float cmax_i = get<0>(lex_result);
+                    float wws_i = get<1>(lex_result);
+
+                    bool feasible_i = (info.status == IloAlgorithm::Optimal ||
+                                        info.status == IloAlgorithm::Feasible);
+
+                    cout << "cp_lex_pool: assignment " << i
+                         << " (slice=" << slice << "s) -> "
+                         << (feasible_i ? "WWS=" + to_string(wws_i) : "no solution")
+                         << endl;
+
+                    if (feasible_i && (!has_incumbent || wws_i < best_wws)) {
+                        has_incumbent = true;
+                        best_wws = wws_i;
+                        best_cmax = cmax_i;
+                    }
+                }
+
+                set_field_i("master_assignments", attempts);   // attempts made, not master's own enumeration
+                set_field_d("runtime_sec", elapsed_seconds());
+                set_field_b("feasible", has_incumbent);
+                // Never claimed proven-optimal here: solve_master_pool()
+                // is explicitly not guaranteed exhaustive (see
+                // Masterproblem.h), so even if every attempted
+                // solve_static_lex() individually proved LEX_OPTIMAL for
+                // its own fixed assignment, that does not prove global
+                // optimality across assignments this pool call might have
+                // missed.
+                set_field_b("optimality_proven", false);
+
+                if (has_incumbent) {
+                    set_field("solver_status", "FEASIBLE_TIME_LIMIT");
+                    set_field_d("best_WWS", best_wws);
+                    set_field_d("actual_Cmax", best_cmax);
+                    set_field_d("gap_to_assignment_lb_percent",
+                                gap_percent(best_wws, lb_ap));
+                } else {
+                    set_field("solver_status", "UNKNOWN");
+                }
+            }
 
         }
         else if (opt.method == "decomp_wws" || opt.method == "decomp_eps") {

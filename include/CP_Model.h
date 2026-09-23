@@ -165,11 +165,25 @@ public:
     // combined with i==2. <= 0 (the default) preserves existing behavior
     // exactly. info, when non-null, is filled with status/bound/the other
     // objective's value/solve time -- see CPSolveInfo.
+    //
+    // known_wws_lower_bound > 0, combined with i==2, additionally adds a
+    // PERMANENT IloSum(costs_) >= known_wws_lower_bound constraint before
+    // the objective (see the 2026-09-23 conversation -- the "CP-WWS-EPS-
+    // SEEDED" experiment method). This is REDUNDANT given a mathematically
+    // valid bound (the true model's own constraints already imply it, so
+    // the feasible region and optimum are unchanged), but hands CP
+    // Optimizer a much tighter starting bound than its own default
+    // internal dual bound would otherwise derive through propagation
+    // alone (measured ~60x weaker on Small instances) -- typically the
+    // output of MASTER_Model::solve_master()'s assignment relaxation for
+    // the same (instance, cmax_epsilon). <= 0 (the default) preserves
+    // existing behavior exactly.
     float solve_obj(
         const DRCRFFSP_Instance& instance,
         int i = 1,
         double cmax_epsilon = -1.0,
-        CPSolveInfo* info = nullptr
+        CPSolveInfo* info = nullptr,
+        double known_wws_lower_bound = -1.0
     );
     pair<float, float> solve_one_after_another(const DRCRFFSP_Instance& instance);
 

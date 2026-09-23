@@ -15,3 +15,7 @@
 /results/
 slurm-*.out
 slurm-*.err
+
+# Python bytecode cache (experiments/ scripts)
+__pycache__/
+*.pyc
