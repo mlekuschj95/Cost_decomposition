@@ -57,8 +57,15 @@ OFFSET="${OFFSET:-0}"
 mkdir -p results/raw
 
 # Row 1 of the manifest (after the header) is SLURM_ARRAY_TASK_ID + OFFSET = 1.
+# `tr -d '\r'` guards against the manifest having picked up Windows-style
+# CRLF line endings (e.g. from an editor/git-on-Windows round-trip) -- cut
+# doesn't strip a trailing \r from the LAST field on a line, so without
+# this, output_file (the last column) silently got a literal \r appended
+# to every filename, invisible in a terminal but invalid on Windows (this
+# is what caused the "blank icon" / "invalid filename syntax" saga when
+# downloading results via WinSCP -- see the 2026-09-24 conversation).
 row_num=$(( SLURM_ARRAY_TASK_ID + OFFSET ))
-row=$(tail -n +2 "$JOBS_CSV" | sed -n "${row_num}p")
+row=$(tail -n +2 "$JOBS_CSV" | sed -n "${row_num}p" | tr -d '\r')
 
 instance=$(echo "$row" | cut -d',' -f2)
 method=$(echo "$row" | cut -d',' -f4)
