@@ -756,9 +756,23 @@ int run_experiment_cli(int argc, char** argv) {
 
                     // The assignment is already KNOWN here (it's the
                     // input, not something to read back from CP) -- export
-                    // it directly for comparison against plain cp_lex's
-                    // freely-chosen one.
-                    write_assignment_file(sol.worker_assignment, assignment_result_path(run_id));
+                    // it for comparison against plain cp_lex's freely-
+                    // chosen one. MASTER_Model's worker_assignment uses
+                    // 0-based ARRAY POSITIONS (matching CPLEX's x_[i][w]
+                    // indexing -- and what CP_Model's fixed-assignment
+                    // constructor itself expects), NOT the worker's real
+                    // 1-based Id() -- convert here so the exported file
+                    // uses the same real-ID convention as cp_lex's own
+                    // get_worker_assignment()-based export (see the
+                    // 2026-09-24 conversation for the bug this fixes).
+                    vector<int> assignment_ids(sol.worker_assignment.size(), -1);
+                    for (size_t i = 0; i < sol.worker_assignment.size(); ++i) {
+                        int pos = sol.worker_assignment[i];
+                        if (pos >= 0) {
+                            assignment_ids[i] = (instance.workers_begin() + pos)->Id();
+                        }
+                    }
+                    write_assignment_file(assignment_ids, assignment_result_path(run_id));
                 }
             }
 
